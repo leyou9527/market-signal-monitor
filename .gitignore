@@ -10,9 +10,6 @@
 id_rsa*
 id_ed25519*
 
-# Private operations documentation
-HANDOVER.md
-
 # Runtime state, caches, and logs
 data/
 logs/
