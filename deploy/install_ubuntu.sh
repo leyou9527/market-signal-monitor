@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="/opt/NDX"
-SERVICE_FILE="/etc/systemd/system/ndx-monitor.service"
-TIMER_FILE="/etc/systemd/system/ndx-monitor.timer"
+APP_DIR="/opt/market-signal-monitor"
+SERVICE_FILE="/etc/systemd/system/market-signal-monitor.service"
+TIMER_FILE="/etc/systemd/system/market-signal-monitor.timer"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Please run this script as root."
@@ -25,14 +25,14 @@ python3 -m venv .venv
 pip install --upgrade pip
 pip install -r requirements.txt
 
-cp deploy/ndx-monitor.service "${SERVICE_FILE}"
-cp deploy/ndx-monitor.timer "${TIMER_FILE}"
+cp deploy/market-signal-monitor.service "${SERVICE_FILE}"
+cp deploy/market-signal-monitor.timer "${TIMER_FILE}"
 
 systemctl daemon-reload
-systemctl enable --now ndx-monitor.timer
-systemctl restart ndx-monitor.timer
+systemctl enable --now market-signal-monitor.timer
+systemctl restart market-signal-monitor.timer
 
-echo "NDX monitor timer is enabled."
+echo "Market Signal Monitor timer is enabled."
 echo "Check status with:"
-echo "  systemctl status ndx-monitor.timer"
-echo "  systemctl list-timers ndx-monitor.timer"
+echo "  systemctl status market-signal-monitor.timer"
+echo "  systemctl list-timers market-signal-monitor.timer"
