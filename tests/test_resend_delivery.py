@@ -3,7 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import ndx_monitor
+import market_monitor
 
 
 class FakeRequestException(Exception):
@@ -55,8 +55,8 @@ class ResendDeliveryTests(unittest.TestCase):
             ]
         )
 
-        with patch.dict(sys.modules, {"requests": fake_requests}), patch.object(ndx_monitor.time, "sleep"):
-            ndx_monitor.send_resend_email(settings(), "subject", "plain", "html")
+        with patch.dict(sys.modules, {"requests": fake_requests}), patch.object(market_monitor.time, "sleep"):
+            market_monitor.send_resend_email(settings(), "subject", "plain", "html")
 
         first_key = fake_requests.calls[0]["headers"]["Idempotency-Key"]
         retry_key = fake_requests.calls[1]["headers"]["Idempotency-Key"]
@@ -67,9 +67,9 @@ class ResendDeliveryTests(unittest.TestCase):
     def test_permanent_failure_does_not_block_later_recipient(self) -> None:
         fake_requests = FakeRequests([FakeResponse(400, "invalid recipient"), FakeResponse(200)])
 
-        with patch.dict(sys.modules, {"requests": fake_requests}), patch.object(ndx_monitor.time, "sleep"):
+        with patch.dict(sys.modules, {"requests": fake_requests}), patch.object(market_monitor.time, "sleep"):
             with self.assertRaisesRegex(RuntimeError, "delivered to 1/2 recipients"):
-                ndx_monitor.send_resend_email(settings(), "subject", "plain", "html")
+                market_monitor.send_resend_email(settings(), "subject", "plain", "html")
 
         self.assertEqual(len(fake_requests.calls), 2)
         self.assertEqual(fake_requests.calls[1]["json"]["to"], ["second@example.com"])
@@ -79,10 +79,10 @@ class ResendDeliveryTests(unittest.TestCase):
 
         with (
             patch.dict(sys.modules, {"requests": fake_requests}),
-            patch.object(ndx_monitor.time, "monotonic", side_effect=[0.0, 0.0, 0.25]),
-            patch.object(ndx_monitor.time, "sleep") as sleep_mock,
+            patch.object(market_monitor.time, "monotonic", side_effect=[0.0, 0.0, 0.25]),
+            patch.object(market_monitor.time, "sleep") as sleep_mock,
         ):
-            ndx_monitor.send_resend_email(settings(), "subject", "plain", "html")
+            market_monitor.send_resend_email(settings(), "subject", "plain", "html")
 
         sleep_mock.assert_called_once_with(0.25)
 
