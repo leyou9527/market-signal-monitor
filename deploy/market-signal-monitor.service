@@ -1,0 +1,10 @@
+[Unit]
+Description=Market Signal Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/market-signal-monitor
+ExecStart=/opt/market-signal-monitor/.venv/bin/python /opt/market-signal-monitor/market_monitor.py
+User=root
