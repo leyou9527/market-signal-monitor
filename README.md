@@ -1,4 +1,4 @@
-# 标普500指数监控说明
+# Market Signal Monitor（标普500 + 科技股）
 
 这个项目用于每天监控：
 
@@ -57,11 +57,11 @@
 
 ## 目录说明
 
-- `ndx_monitor.py`：正式监控脚本
+- `market_monitor.py`：正式监控脚本
 - `.env.example`：配置模板
 - `requirements.txt`：Python 依赖
-- `deploy/ndx-monitor.service`：systemd 服务模板
-- `deploy/ndx-monitor.timer`：systemd 定时器模板
+- `deploy/market-signal-monitor.service`：systemd 服务模板
+- `deploy/market-signal-monitor.timer`：systemd 定时器模板
 - `longbridge_probe.py`：长桥开放平台测试脚本，仅做单独验证，不参与正式链路
 
 ## 本地或 VPS 初始化
@@ -79,9 +79,9 @@ cp .env.example .env
 
 常用变量如下：
 
-- `NDX_LOOKBACK_DAYS`：指数回看窗口，默认 `60`
-- `NDX_60D_DROP_THRESHOLD_PCT`：指数 60 日回撤阈值，默认 `7`
-- `NDX_YTD_DROP_THRESHOLD_PCT`：指数 YTD 跌幅阈值，默认 `7`
+- `INDEX_LOOKBACK_DAYS`：指数回看窗口，默认 `60`
+- `INDEX_60D_DROP_THRESHOLD_PCT`：指数 60 日回撤阈值，默认 `7`
+- `INDEX_YTD_DROP_THRESHOLD_PCT`：指数 YTD 跌幅阈值，默认 `7`
 - `STOCK_LOOKBACK_DAYS`：个股回看窗口，默认 `60`
 - `STOCK_60D_DROP_THRESHOLD_PCT`：个股 60 日回撤阈值，默认 `20`
 - `TECH_STOCKS`：股票列表，默认 `MSFT,NVDA,META,AAPL,GOOGL,AMZN,TSM,AVGO`
@@ -94,13 +94,13 @@ cp .env.example .env
 - `EODHD_STOCK_EXCHANGE_CODE`：默认 `US`
 - `EODHD_INDEX_SYMBOLS`：默认 `GSPC.INDX,SPX.INDX,SP500.INDX,^GSPC.INDX`
 - `CACHE_DIR`：诊断缓存目录，不作为当天正式行情来源
-- `LOG_FILE`：日志文件路径，默认 `/opt/NDX/logs/ndx-monitor.log`
+- `LOG_FILE`：日志文件路径，默认 `/opt/market-signal-monitor/logs/market-signal-monitor.log`
 - `STATE_FILE`：状态文件路径，默认 `data/state.json`
 
 说明：
 
-- 虽然当前监控对象已经切换成标普500指数，但为了兼容旧部署，配置字段名仍然沿用 `NDX_*`
-- 这些 `NDX_*` 字段现在实际控制的是“指数维度”的规则，不再特指旧版本里的纳指监控
+- 新部署优先使用 `INDEX_*` 配置字段，名称与当前“指数维度”逻辑一致
+- 程序仍兼容旧版 `NDX_*` 字段，因此现有 VPS 的 `.env` 不需要立刻迁移
 - 如果你希望稳定拿到标普500指数的最新收盘数据，强烈建议配置 `EODHD_API_KEY`
 
 邮件发送相关：
@@ -133,15 +133,15 @@ SMTP 备用配置：
 ## 手动运行
 
 ```bash
-python ndx_monitor.py --dry-run
-python ndx_monitor.py --send-test-email
-python ndx_monitor.py
+python market_monitor.py --dry-run
+python market_monitor.py --send-test-email
+python market_monitor.py
 ```
 
 如果你想忽略“今天是否已经发过”的状态，强制补跑一次：
 
 ```bash
-python ndx_monitor.py --force-send
+python market_monitor.py --force-send
 ```
 
 补充说明：
@@ -152,7 +152,7 @@ python ndx_monitor.py --force-send
 
 ## 部署到 Linux VPS
 
-1. 把项目上传到 VPS，例如 `/opt/NDX`
+1. 把项目上传到 VPS，例如 `/opt/market-signal-monitor`
 2. 创建虚拟环境并安装依赖
 3. 拷贝 `.env.example` 为 `.env`
 4. 填好 SMTP 和 API key
@@ -161,16 +161,16 @@ python ndx_monitor.py --force-send
 示例：
 
 ```bash
-cd /opt/NDX
+cd /opt/market-signal-monitor
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-sudo cp deploy/ndx-monitor.service /etc/systemd/system/
-sudo cp deploy/ndx-monitor.timer /etc/systemd/system/
+sudo cp deploy/market-signal-monitor.service /etc/systemd/system/
+sudo cp deploy/market-signal-monitor.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now ndx-monitor.timer
-systemctl list-timers ndx-monitor.timer
+sudo systemctl enable --now market-signal-monitor.timer
+systemctl list-timers market-signal-monitor.timer
 ```
 
 当前定时器逻辑是：
@@ -206,21 +206,21 @@ fc-cache -fv
 常用命令：
 
 ```bash
-tail -f /opt/NDX/logs/ndx-monitor.log
-tail -n 100 /opt/NDX/logs/ndx-monitor.log
-journalctl -u ndx-monitor.service -n 50 --no-pager
-systemctl status ndx-monitor.timer --no-pager
-systemctl status ndx-monitor.service --no-pager
+tail -f /opt/market-signal-monitor/logs/market-signal-monitor.log
+tail -n 100 /opt/market-signal-monitor/logs/market-signal-monitor.log
+journalctl -u market-signal-monitor.service -n 50 --no-pager
+systemctl status market-signal-monitor.timer --no-pager
+systemctl status market-signal-monitor.service --no-pager
 ```
 
 ## 排查思路
 
 如果某天没收到邮件，优先按这个顺序查：
 
-1. `systemctl list-timers ndx-monitor.timer`
-2. `systemctl status ndx-monitor.service --no-pager`
-3. `tail -n 100 /opt/NDX/logs/ndx-monitor.log`
-4. `journalctl -u ndx-monitor.service --since "today 07:40" --no-pager`
+1. `systemctl list-timers market-signal-monitor.timer`
+2. `systemctl status market-signal-monitor.service --no-pager`
+3. `tail -n 100 /opt/market-signal-monitor/logs/market-signal-monitor.log`
+4. `journalctl -u market-signal-monitor.service --since "today 07:40" --no-pager`
 
 常见几类结果：
 
