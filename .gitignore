@@ -7,8 +7,18 @@
 *.p12
 *.pfx
 *.ppk
+*.jks
+*.keystore
 id_rsa*
 id_ed25519*
+.netrc
+_netrc
+.pypirc
+.npmrc
+.authinfo
+.authinfo.gpg
+secrets/
+credentials/
 
 # Runtime state, caches, and logs
 data/
@@ -37,6 +47,7 @@ dist/
 .idea/
 .vscode/
 .agents/
+.codex/
 
 # Operating-system files
 .DS_Store
