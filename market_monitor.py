@@ -503,7 +503,647 @@ def fetch_from_twelvedata(session, symbol: str, settings: Settings) -> list[Bar]
                 lowered = message.lower()
                 # 额度耗尽和 symbol 无效这两类错误都不是“等两秒再试一次”能解决的，
                 # 所以一旦识别出来就直接切下一个源，避免把分钟额度快速打爆。
-                if …6910 tokens truncated…load_state(settings.state_file)
+                if "run out of api credits" in lowered or "missing or invalid" in lowered:
+                    raise NonRetryableProviderError(message)
+                raise RuntimeError(message)
+            values = payload.get("values") or []
+            bars = parse_json_bars(values)
+            if len(bars) < 60:
+                raise RuntimeError(f"Twelve Data returned only {len(bars)} valid rows for {symbol}")
+            return bars
+        except NonRetryableProviderError:
+            raise
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Twelve Data fetch failed for {symbol}: {last_error}") from last_error
+
+
+def fetch_from_eodhd(session, symbol: str, settings: Settings) -> list[Bar]:
+    if not settings.eodhd_api_key:
+        raise NonRetryableProviderError("EODHD_API_KEY is not configured")
+
+    date_from = (datetime.now(timezone.utc) - timedelta(days=450)).strftime("%Y-%m-%d")
+    date_to = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    last_error: Exception | None = None
+
+    for candidate in eodhd_symbol_candidates(symbol, settings):
+        try:
+            response = session.get(
+                f"https://eodhd.com/api/eod/{candidate}",
+                params={
+                    "api_token": settings.eodhd_api_key,
+                    "fmt": "json",
+                    "from": date_from,
+                    "to": date_to,
+                },
+                timeout=settings.request_timeout_seconds,
+            )
+            if 400 <= response.status_code < 500:
+                raise NonRetryableProviderError(f"EODHD returned HTTP {response.status_code} for {candidate}")
+            response.raise_for_status()
+            payload = response.json()
+            if isinstance(payload, dict):
+                message = payload.get("error") or payload.get("message") or payload.get("status")
+                if message:
+                    raise NonRetryableProviderError(f"EODHD returned {message} for {candidate}")
+                raise RuntimeError(f"Unexpected EODHD payload shape for {candidate}: dict")
+            if not isinstance(payload, list):
+                raise RuntimeError(f"Unexpected EODHD payload shape for {candidate}: {type(payload).__name__}")
+
+            bars = parse_json_bars(payload)
+            if len(bars) < 60:
+                raise RuntimeError(f"EODHD returned only {len(bars)} valid rows for {candidate}")
+            return bars
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(f"EODHD fetch failed for {symbol}: {last_error}") from last_error
+
+
+def fetch_from_stooq(session, symbol: str, settings: Settings) -> list[Bar]:
+    # Stooq 留在链路里，是因为它在某些场景下反而比其他免费源更稳；
+    # 但它也出现过 200 + 空 body，所以只能放在后面的兜底层。
+    params = {
+        "s": stooq_symbol(symbol),
+        "i": "d",
+        "d1": (datetime.now(timezone.utc) - timedelta(days=450)).strftime("%Y%m%d"),
+        "d2": datetime.now(timezone.utc).strftime("%Y%m%d"),
+    }
+    response = session.get(STOOQ_URL, params=params, headers=STOOQ_HEADERS, timeout=settings.request_timeout_seconds)
+    response.raise_for_status()
+    text = response.text.strip()
+    if not text:
+        raise RuntimeError("Stooq returned an empty response body")
+    if "No data" in text:
+        raise RuntimeError(f"Stooq returned no data for {symbol}")
+    bars = parse_stooq_csv(text)
+    if len(bars) < 60:
+        raise RuntimeError(f"Stooq returned only {len(bars)} valid rows for {symbol}")
+    return bars
+
+
+def fetch_from_yahoo(session, symbol: str, settings: Settings) -> list[Bar]:
+    # Yahoo 不是正式带 SLA 的付费数据接口，但覆盖面很广，
+    # 作为中后段兜底非常有价值，尤其是指数类数据经常能补上别家拿不到的空缺。
+    quote_symbol = yahoo_symbol(symbol)
+    session.get(
+        f"https://finance.yahoo.com/quote/{quote_symbol}",
+        headers={"User-Agent": STOOQ_HEADERS["User-Agent"], "Accept-Language": STOOQ_HEADERS["Accept-Language"]},
+        timeout=settings.request_timeout_seconds,
+    )
+    params = {
+        "interval": "1d",
+        "range": "2y",
+        "includePrePost": "false",
+        "events": "div,splits",
+    }
+    last_error: Exception | None = None
+    freshest_bars: list[Bar] | None = None
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        try:
+            response = session.get(
+                f"https://{host}/v8/finance/chart/{quote_symbol}",
+                params=params,
+                headers={
+                    "User-Agent": STOOQ_HEADERS["User-Agent"],
+                    "Accept": "application/json,text/plain,*/*",
+                    "Accept-Language": STOOQ_HEADERS["Accept-Language"],
+                    "Referer": "https://finance.yahoo.com/",
+                    "Origin": "https://finance.yahoo.com",
+                },
+                timeout=settings.request_timeout_seconds,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            result = (payload.get("chart", {}).get("result") or [None])[0]
+            if not result:
+                error_info = payload.get("chart", {}).get("error")
+                raise RuntimeError(f"Yahoo chart payload is empty: {error_info}")
+
+            timestamps = result.get("timestamp") or []
+            indicators = result.get("indicators", {}).get("quote") or []
+            if not timestamps or not indicators:
+                raise RuntimeError("Yahoo chart response has no candles")
+
+            quote = indicators[0]
+            opens = quote.get("open") or []
+            highs = quote.get("high") or []
+            lows = quote.get("low") or []
+            closes = quote.get("close") or []
+
+            bars: list[Bar] = []
+            for ts, open_price, high_price, low_price, close_price in zip(timestamps, opens, highs, lows, closes):
+                if None in (open_price, high_price, low_price, close_price):
+                    continue
+                bars.append(
+                    Bar(
+                        date=datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d"),
+                        open=float(open_price),
+                        high=float(high_price),
+                        low=float(low_price),
+                        close=float(close_price),
+                    )
+                )
+            bars.sort(key=lambda item: item.date)
+            if len(bars) < 60:
+                raise RuntimeError(f"Yahoo returned only {len(bars)} valid rows for {symbol}")
+            if freshest_bars is None or bars[-1].date > freshest_bars[-1].date:
+                freshest_bars = bars
+        except Exception as exc:
+            last_error = exc
+    if freshest_bars is not None:
+        return freshest_bars
+    raise RuntimeError(f"Yahoo fetch failed for {symbol}: {last_error}") from last_error
+
+
+def provider_chain_for(symbol: str) -> tuple[tuple[str, object], ...]:
+    return (
+        (("fmp", fetch_from_fmp), ("eodhd", fetch_from_eodhd), ("yahoo", fetch_from_yahoo), ("stooq", fetch_from_stooq))
+        if symbol == INDEX_SYMBOL
+        else (
+            ("fmp", fetch_from_fmp),
+            ("twelvedata", fetch_from_twelvedata),
+            ("eodhd", fetch_from_eodhd),
+            ("yahoo", fetch_from_yahoo),
+            ("stooq", fetch_from_stooq),
+        )
+    )
+
+
+def fetch_provider_result(
+    session,
+    symbol: str,
+    settings: Settings,
+    logger: logging.Logger,
+    provider_name: str,
+    provider,
+) -> FetchResult:
+    errors: list[str] = []
+    for attempt in range(1, settings.request_retries + 1):
+        try:
+            bars = provider(session, symbol, settings)
+            save_cached_bars(settings, symbol, bars, provider_name)
+            logger.info(
+                "%s data fetched from %s (%s rows, latest %s)",
+                symbol,
+                provider_name,
+                len(bars),
+                bars[-1].date,
+            )
+            return FetchResult(bars=bars, source=provider_name)
+        except Exception as exc:
+            errors.append(f"{provider_name} attempt {attempt}: {exc}")
+            logger.warning("%s fetch failed via %s (attempt %s/%s): %s", symbol, provider_name, attempt, settings.request_retries, exc)
+            if isinstance(exc, NonRetryableProviderError):
+                break
+            if attempt < settings.request_retries:
+                time.sleep(settings.request_retry_delay_seconds)
+
+    raise RuntimeError(f"Failed to fetch usable data for {symbol}: {' | '.join(errors)}")
+
+
+def collect_fetch_candidates(symbol: str, settings: Settings, logger: logging.Logger) -> dict[str, FetchResult]:
+    # 每个标的把所有 provider 的可用结果都收集起来，后面统一按“目标市场日期”做选择。
+    # 这样允许不同标的来自不同源，但同一标的仍然整根K线只来自同一个 provider。
+    try:
+        import requests
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Missing dependency 'requests'. Install it with: pip install -r requirements.txt"
+        ) from exc
+
+    session = requests.Session()
+    candidates: dict[str, FetchResult] = {}
+    errors: list[str] = []
+    for provider_name, provider in provider_chain_for(symbol):
+        try:
+            candidates[provider_name] = fetch_provider_result(session, symbol, settings, logger, provider_name, provider)
+        except Exception as exc:
+            errors.append(str(exc))
+    if not candidates:
+        raise RuntimeError(f"No usable providers for {symbol}: {' | '.join(errors)}")
+    return candidates
+
+
+def result_contains_market_date(result: FetchResult, market_date: str) -> bool:
+    return bool(result.bars) and result.bars[0].date <= market_date <= result.bars[-1].date and any(
+        bar.date == market_date for bar in result.bars
+    )
+
+
+def trim_result_to_market_date(result: FetchResult, market_date: str) -> FetchResult:
+    trimmed_bars = [bar for bar in result.bars if bar.date <= market_date]
+    if not trimmed_bars or trimmed_bars[-1].date != market_date:
+        raise RuntimeError(f"{result.source} does not contain market date {market_date}")
+    return FetchResult(bars=trimmed_bars, source=result.source)
+
+
+def select_symbol_result(
+    symbol: str,
+    candidates: dict[str, FetchResult],
+    market_date: str,
+) -> FetchResult:
+    provider_priority = {provider_name: index for index, (provider_name, _) in enumerate(provider_chain_for(symbol))}
+    eligible_results = [
+        trim_result_to_market_date(result, market_date)
+        for provider_name, result in candidates.items()
+        if result_contains_market_date(result, market_date)
+    ]
+    if not eligible_results:
+        raise RuntimeError(f"No provider for {symbol} contains market date {market_date}")
+    eligible_results.sort(key=lambda result: provider_priority.get(result.source, 999))
+    return eligible_results[0]
+
+
+def resolve_market_snapshot(
+    index_candidates: dict[str, FetchResult],
+    stock_candidate_map: dict[str, dict[str, FetchResult]],
+    logger: logging.Logger,
+) -> tuple[str, FetchResult, dict[str, FetchResult]]:
+    all_candidates = {INDEX_SYMBOL: index_candidates, **stock_candidate_map}
+    best_latest_dates = {
+        symbol: max(result.bars[-1].date for result in candidates.values())
+        for symbol, candidates in all_candidates.items()
+    }
+    target_market_date = max(best_latest_dates.values())
+    symbols_missing_target = [symbol for symbol, latest_date in best_latest_dates.items() if latest_date < target_market_date]
+
+    if symbols_missing_target:
+        logger.warning(
+            "Latest market date is not aligned yet. target=%s | stale=%s",
+            target_market_date,
+            ", ".join(
+                f"{symbol}={best_latest_dates[symbol]} via "
+                f"{max(all_candidates[symbol].values(), key=lambda item: item.bars[-1].date).source}"
+                for symbol in symbols_missing_target
+            ),
+        )
+        if is_market_data_finalized(target_market_date):
+            raise RuntimeError(
+                f"Latest finalized market date mismatch: expected all symbols at {target_market_date}, "
+                + ", ".join(f"{symbol}={best_latest_dates[symbol]}" for symbol in sorted(best_latest_dates))
+            )
+        target_market_date = min(best_latest_dates.values())
+        logger.warning(
+            "Proceeding with common market date %s after intraday mismatch: %s",
+            target_market_date,
+            ", ".join(f"{symbol}={best_latest_dates[symbol]}" for symbol in sorted(best_latest_dates)),
+        )
+
+    index_result = select_symbol_result(INDEX_SYMBOL, index_candidates, target_market_date)
+    stock_fetch_results = {
+        symbol: select_symbol_result(symbol, candidates, target_market_date)
+        for symbol, candidates in stock_candidate_map.items()
+    }
+    return target_market_date, index_result, stock_fetch_results
+
+
+def build_metric(symbol: str, bars: list[Bar], lookback_days: int, with_ytd: bool) -> tuple[Metric, list[Bar]]:
+    # 所有报警判断最终都要落回一组统一指标，所以这里故意把计算收口到一个函数。
+    # 这样无论数据来自哪家 provider，报警口径都能保持一致。
+    if len(bars) < lookback_days:
+        raise RuntimeError(f"{symbol} data is too short")
+
+    window_60d = bars[-lookback_days:]
+    current = window_60d[-1]
+    previous = bars[-2] if len(bars) >= 2 else None
+    high_60d_bar = max(window_60d, key=lambda item: item.close)
+
+    current_dt = datetime.strptime(current.date, "%Y-%m-%d")
+    cutoff = (current_dt - timedelta(days=370)).strftime("%Y-%m-%d")
+    window_1y = [bar for bar in bars if bar.date >= cutoff]
+    if not window_1y:
+        window_1y = bars[-min(len(bars), 252):]
+    high_1y_bar = max(window_1y, key=lambda item: item.close)
+    low_1y_bar = min(window_1y, key=lambda item: item.close)
+
+    metric = Metric(
+        symbol=symbol,
+        current_date=current.date,
+        current_close=current.close,
+        previous_close=previous.close if previous else None,
+        previous_date=previous.date if previous else None,
+        daily_change_pct=((current.close / previous.close) - 1) * 100 if previous and previous.close else None,
+        high_60d=high_60d_bar.close,
+        high_60d_date=high_60d_bar.date,
+        drawdown_60d_pct=((high_60d_bar.close - current.close) / high_60d_bar.close) * 100,
+        high_1y=high_1y_bar.close,
+        high_1y_date=high_1y_bar.date,
+        low_1y=low_1y_bar.close,
+        low_1y_date=low_1y_bar.date,
+        drawdown_1y_pct=max(((high_1y_bar.close - current.close) / high_1y_bar.close) * 100, 0.0),
+    )
+
+    if with_ytd:
+        year_bars = [bar for bar in bars if bar.date.startswith(current.date[:4])]
+        year_start = year_bars[0]
+        metric.ytd_start_date = year_start.date
+        metric.ytd_start_close = year_start.close
+        metric.ytd_change_pct = ((current.close / year_start.close) - 1) * 100
+
+    return metric, window_60d
+
+
+def resolve_chart_font():
+    from matplotlib import font_manager
+
+    for path in [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+    ]:
+        if Path(path).exists():
+            return font_manager.FontProperties(fname=path)
+    return None
+
+
+def build_chart(index_metric: Metric, bars: list[Bar]) -> bytes:
+    # 图表不是主逻辑，而是提升可读性的附加能力。
+    # 所以这里单独做函数，便于主流程在图表失败时退化成“只发文字版”。
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    chart_font = resolve_chart_font()
+    plt.rcParams["axes.unicode_minus"] = False
+
+    fig, ax = plt.subplots(figsize=(11, 6), dpi=140)
+    fig.patch.set_facecolor("#f8fafc")
+    ax.set_facecolor("#ffffff")
+
+    for idx, bar in enumerate(bars):
+        color = "#16a34a" if bar.close >= bar.open else "#dc2626"
+        ax.vlines(idx, bar.low, bar.high, color=color, linewidth=1)
+        ax.add_patch(
+            Rectangle(
+                (idx - 0.3, min(bar.open, bar.close)),
+                0.6,
+                max(abs(bar.close - bar.open), 1.0),
+                facecolor=color,
+                edgecolor=color,
+            )
+        )
+
+    ax.set_title(
+        f"{INDEX_DISPLAY_NAME}最近{len(bars)}个交易日K线\n今日 {format_signed_pct(index_metric.daily_change_pct)} | 60日回撤 {index_metric.drawdown_60d_pct:.2f}% | YTD {index_metric.ytd_change_pct:.2f}%",
+        fontproperties=chart_font,
+    )
+    ax.set_ylabel("指数点位", fontproperties=chart_font)
+
+    tick_step = max(1, len(bars) // 8)
+    ticks = list(range(0, len(bars), tick_step))
+    if ticks[-1] != len(bars) - 1:
+        ticks.append(len(bars) - 1)
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([bars[i].date[5:] for i in ticks])
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+    output = io.BytesIO()
+    plt.tight_layout()
+    fig.savefig(output, format="png", bbox_inches="tight")
+    plt.close(fig)
+    return output.getvalue()
+
+
+def parse_email_addresses(value: str) -> list[str]:
+    return [address for _name, address in getaddresses([value]) if address]
+
+
+def unique_email_addresses(addresses: list[str]) -> list[str]:
+    seen = set()
+    unique = []
+    for address in addresses:
+        key = address.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(address)
+    return unique
+
+
+def resend_retry_wait_seconds(response: object | None, attempt: int, base_delay_seconds: float) -> float:
+    if response is not None:
+        headers = getattr(response, "headers", {})
+        for header_name in ("retry-after", "ratelimit-reset"):
+            header_value = headers.get(header_name)
+            if header_value is None:
+                continue
+            try:
+                return max(float(header_value), 0.0)
+            except (TypeError, ValueError):
+                pass
+    return base_delay_seconds * (2 ** max(attempt - 1, 0))
+
+
+def send_resend_email(settings: Settings, subject: str, plain: str, html: str, chart_bytes: bytes | None = None) -> None:
+    import requests
+
+    recipients = unique_email_addresses(parse_email_addresses(settings.smtp_recipient) + parse_email_addresses(settings.smtp_bcc))
+    if not recipients:
+        raise RuntimeError("Resend email delivery failed: no valid recipients")
+
+    logger = logging.getLogger("market_signal_monitor")
+    minimum_request_interval = 1.0 / settings.resend_requests_per_second
+    last_request_started: float | None = None
+    failures: list[str] = []
+    if chart_bytes is not None:
+        attachments: list[dict[str, str]] | None = [
+            {
+                "filename": "market-chart.png",
+                "content": base64.b64encode(chart_bytes).decode("ascii"),
+                "content_id": "market_chart",
+            }
+        ]
+    else:
+        attachments = None
+
+    for recipient_index, recipient in enumerate(recipients, start=1):
+        payload: dict[str, object] = {
+            "from": settings.resend_from,
+            "to": [recipient],
+            "subject": subject,
+            "text": plain,
+            "html": html,
+        }
+        if attachments is not None:
+            payload["attachments"] = attachments
+
+        # The same key is reused only for retries of this recipient. A new program run
+        # gets a fresh key, while ambiguous network failures cannot create duplicates.
+        idempotency_key = f"market-signal-{uuid.uuid4().hex}"
+        failure_detail = "unknown error"
+
+        for attempt in range(1, settings.resend_max_attempts + 1):
+            if last_request_started is not None:
+                elapsed = time.monotonic() - last_request_started
+                pacing_wait = minimum_request_interval - elapsed
+                if pacing_wait > 0:
+                    time.sleep(pacing_wait)
+            last_request_started = time.monotonic()
+
+            response = None
+            try:
+                response = requests.post(
+                    "https://api.resend.com/emails",
+                    headers={
+                        "Authorization": f"Bearer {settings.resend_api_key}",
+                        "Content-Type": "application/json",
+                        "Idempotency-Key": idempotency_key,
+                    },
+                    json=payload,
+                    timeout=settings.request_timeout_seconds,
+                )
+            except requests.RequestException as exc:
+                failure_detail = f"network error: {exc}"
+                retryable = True
+            else:
+                if response.status_code < 400:
+                    logger.info(
+                        "Resend accepted email for %s (%s/%s).",
+                        recipient,
+                        recipient_index,
+                        len(recipients),
+                    )
+                    break
+                failure_detail = f"HTTP {response.status_code} {response.text[:500]}"
+                retryable = response.status_code == 429 or response.status_code >= 500
+
+            if not retryable or attempt >= settings.resend_max_attempts:
+                failures.append(f"{recipient}: {failure_detail}")
+                logger.error("Resend delivery failed for %s after %s attempt(s): %s", recipient, attempt, failure_detail)
+                break
+
+            retry_wait = resend_retry_wait_seconds(response, attempt, settings.resend_retry_delay_seconds)
+            logger.warning(
+                "Resend delivery retry for %s after %s (attempt %s/%s, wait %.2fs).",
+                recipient,
+                failure_detail,
+                attempt,
+                settings.resend_max_attempts,
+                retry_wait,
+            )
+            if retry_wait > 0:
+                time.sleep(retry_wait)
+
+    if failures:
+        raise RuntimeError(
+            f"Resend delivered to {len(recipients) - len(failures)}/{len(recipients)} recipients; "
+            f"failures: {' | '.join(failures)}"
+        )
+
+
+def send_smtp_email(settings: Settings, subject: str, plain: str, html: str, chart_bytes: bytes | None = None) -> None:
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = settings.smtp_sender
+    message["To"] = settings.smtp_recipient
+    recipients = parse_email_addresses(settings.smtp_recipient) + parse_email_addresses(settings.smtp_bcc)
+    message.set_content(plain)
+    message.add_alternative(html, subtype="html")
+    if chart_bytes is not None:
+        message.get_payload()[-1].add_related(
+            chart_bytes,
+            maintype="image",
+            subtype="png",
+            cid="<market_chart>",
+            filename="market-chart.png",
+        )
+
+    if settings.smtp_use_ssl:
+        with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, context=ssl.create_default_context()) as server:
+            server.login(settings.smtp_user, settings.smtp_password)
+            server.send_message(message, to_addrs=recipients)
+        return
+
+    with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
+        server.ehlo()
+        if settings.smtp_use_starttls:
+            server.starttls(context=ssl.create_default_context())
+            server.ehlo()
+        server.login(settings.smtp_user, settings.smtp_password)
+        server.send_message(message, to_addrs=recipients)
+
+
+def send_email(settings: Settings, subject: str, plain: str, html: str, chart_bytes: bytes | None = None) -> None:
+    if settings.email_provider == "resend":
+        send_resend_email(settings, subject, plain, html, chart_bytes)
+        return
+    send_smtp_email(settings, subject, plain, html, chart_bytes)
+
+
+def send_failure_email(settings: Settings, error_message: str, log_file: Path) -> None:
+    # 这里专门发“异常通知”，是因为真正重要的不是每次都硬凑一封日报，
+    # 而是当日报无法保证准确时，用户至少要第一时间知道服务出了问题。
+    today = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    subject = "[市场监控异常] 数据获取失败"
+    plain = (
+        "今天的市场日报没有正常生成。\n\n"
+        f"失败时间: {today}\n"
+        f"错误信息: {error_message}\n"
+        f"日志文件: {log_file}\n\n"
+        "建议先查看日志或手动执行 python market_monitor.py --force-send 复查。"
+    )
+    html = f"""<!DOCTYPE html>
+<html>
+  <body style="margin:0;padding:20px;background:#f8fafc;font-family:'PingFang SC','Microsoft YaHei','Segoe UI',Arial,sans-serif;color:#0f172a;">
+    <table role='presentation' width='100%' cellpadding='0' cellspacing='0'>
+      <tr>
+        <td align='center'>
+          <table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='max-width:640px;background:#ffffff;border:1px solid #e2e8f0;border-radius:18px;'>
+            <tr>
+              <td style='padding:20px 20px 12px;'>
+                <div style='display:inline-block;padding:5px 10px;background:#fee2e2;color:#991b1b;border-radius:999px;font-size:11px;font-weight:700;'>MONITOR ERROR</div>
+                <div style='margin-top:12px;font-size:24px;line-height:1.35;font-weight:800;'>今天的市场日报发送失败</div>
+              </td>
+            </tr>
+            <tr>
+              <td style='padding:0 20px 20px;'>
+                <div style='background:#fef2f2;border:1px solid #fecaca;border-radius:14px;padding:14px 16px;font-size:14px;line-height:1.8;color:#7f1d1d;'>
+                  <div><strong>失败时间：</strong>{today}</div>
+                  <div><strong>错误信息：</strong>{error_message}</div>
+                  <div><strong>日志文件：</strong>{log_file}</div>
+                </div>
+                <div style='margin-top:14px;font-size:14px;line-height:1.8;color:#475569;'>建议先查看日志，或手动执行 <strong>python market_monitor.py --force-send</strong> 复查。</div>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"""
+    send_email(settings, subject, plain, html)
+
+
+def is_market_data_finalized(market_date: str, now_utc: datetime | None = None) -> bool:
+    # 这里的判断目标不是“美国现在是不是休市”，而是“这根日线是不是已经可以当正式收盘数据用了”。
+    # 对日报去重来说，这一点最关键：盘中快照可以发，但不能挡住收盘后的正式日报。
+    now_utc = now_utc or datetime.now(timezone.utc)
+    now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+    market_day = datetime.strptime(market_date, "%Y-%m-%d").date()
+    today_et = now_et.date()
+    if market_day < today_et:
+        return True
+    if market_day > today_et:
+        return False
+    return (now_et.hour, now_et.minute) >= (17, 0)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Monitor S&P 500 and major tech stock daily summaries.")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--send-test-email", action="store_true")
+    parser.add_argument("--force-send", action="store_true")
+    args = parser.parse_args()
+
+    base_dir = Path(__file__).resolve().parent
+    load_dotenv(base_dir / ".env")
+    settings = load_settings(base_dir)
+    logger = setup_logging(settings.log_file)
+    state = load_state(settings.state_file)
     today_local = datetime.now().astimezone().date().isoformat()
 
     try:
