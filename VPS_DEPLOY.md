@@ -9,9 +9,9 @@
 本文默认场景：
 
 - 系统是 `Ubuntu / Debian`
-- 项目部署目录使用 `/opt/NDX`
+- 项目部署目录使用 `/opt/market-signal-monitor`
 - 使用 `systemd timer` 定时运行
-- 发信方式是 SMTP
+- 推荐使用 Resend 发信，也保留 SMTP 兼容
 
 如果你不是 `root` 用户，文中的系统级命令前面加 `sudo` 即可。
 
@@ -39,8 +39,8 @@
 
 补充说明：
 
-- `.env` 里和指数相关的变量名目前仍沿用 `NDX_*`
-- 这是为了兼容旧部署；这些字段现在实际控制的是标普500指数，不再对应旧版本里的纳指监控
+- 新部署使用 `INDEX_*` 变量名描述指数监控规则
+- 程序仍兼容旧版 `NDX_*` 别名，因此旧 VPS 可以平滑迁移
 
 ## 二、第一步：登录 VPS
 
@@ -91,7 +91,7 @@ fc-cache -fv
 推荐把项目放在：
 
 ```bash
-/opt/NDX
+/opt/market-signal-monitor
 ```
 
 ### 方式 A：从本机直接上传整个目录
@@ -99,28 +99,28 @@ fc-cache -fv
 如果你在 Windows PowerShell，可以执行：
 
 ```powershell
-scp -r C:\Users\leyou\Desktop\code\codex\NDX root@你的VPSIP:/opt/
+scp -r C:\Users\leyou\Desktop\code\market-signal-monitor root@你的VPSIP:/opt/
 ```
 
 上传后 VPS 上的目录会是：
 
 ```bash
-/opt/NDX
+/opt/market-signal-monitor
 ```
 
 ### 方式 B：如果你只想上传关键文件
 
 至少要保证这些文件在 VPS 上：
 
-- `ndx_monitor.py`
+- `market_monitor.py`
 - `requirements.txt`
 - `.env`
 - `.env.example`
 - `README.md`
 - `HANDOVER.md`
 - `VPS_DEPLOY.md`
-- `deploy/ndx-monitor.service`
-- `deploy/ndx-monitor.timer`
+- `deploy/market-signal-monitor.service`
+- `deploy/market-signal-monitor.timer`
 
 重要提醒：
 
@@ -132,13 +132,13 @@ scp -r C:\Users\leyou\Desktop\code\codex\NDX root@你的VPSIP:/opt/
 进入项目目录：
 
 ```bash
-cd /opt/NDX
+cd /opt/market-signal-monitor
 ls -la
 ```
 
 你至少应该能看到：
 
-- `ndx_monitor.py`
+- `market_monitor.py`
 - `requirements.txt`
 - `.env`
 - `deploy`
@@ -148,7 +148,7 @@ ls -la
 如果这是全新 VPS，执行：
 
 ```bash
-cd /opt/NDX
+cd /opt/market-signal-monitor
 python3 -m venv .venv
 source .venv/bin/activate
 ```
@@ -236,7 +236,7 @@ EODHD_INDEX_SYMBOLS=GSPC.INDX,SPX.INDX,SP500.INDX,^GSPC.INDX
 建议保持默认：
 
 ```env
-LOG_FILE=/opt/NDX/logs/ndx-monitor.log
+LOG_FILE=/opt/market-signal-monitor/logs/market-signal-monitor.log
 ```
 
 ### 4. 缓存路径
@@ -244,7 +244,7 @@ LOG_FILE=/opt/NDX/logs/ndx-monitor.log
 建议保持默认：
 
 ```env
-CACHE_DIR=/opt/NDX/data/cache
+CACHE_DIR=/opt/market-signal-monitor/data/cache
 ```
 
 ### 5. 状态文件路径
@@ -252,7 +252,7 @@ CACHE_DIR=/opt/NDX/data/cache
 如果你没特殊需求，可以不写，程序会默认写到：
 
 ```bash
-/opt/NDX/data/state.json
+/opt/market-signal-monitor/data/state.json
 ```
 
 编辑完成后，可以快速检查关键字段有没有：
@@ -266,9 +266,9 @@ grep -E "^(EMAIL_PROVIDER|RESEND_FROM|SMTP_RECIPIENT|FMP_API_KEY|TWELVEDATA_API_
 ### 1. 先做 dry-run
 
 ```bash
-cd /opt/NDX
+cd /opt/market-signal-monitor
 source .venv/bin/activate
-python ndx_monitor.py --dry-run
+python market_monitor.py --dry-run
 ```
 
 这个命令不会真正发正式日报，但会去拉行情并计算指标。
@@ -277,7 +277,7 @@ python ndx_monitor.py --dry-run
 ### 2. 再发测试邮件
 
 ```bash
-python ndx_monitor.py --send-test-email
+python market_monitor.py --send-test-email
 ```
 
 这一步主要验证：
@@ -291,7 +291,7 @@ python ndx_monitor.py --send-test-email
 ### 3. 如果想补跑一次正式邮件
 
 ```bash
-python ndx_monitor.py --force-send
+python market_monitor.py --force-send
 ```
 
 这个命令会忽略“今天是否已经发过”的状态，强制按正式逻辑跑一次。
@@ -306,13 +306,13 @@ python ndx_monitor.py --force-send
 本地日志文件：
 
 ```bash
-tail -n 100 /opt/NDX/logs/ndx-monitor.log
+tail -n 100 /opt/market-signal-monitor/logs/market-signal-monitor.log
 ```
 
 实时看日志：
 
 ```bash
-tail -f /opt/NDX/logs/ndx-monitor.log
+tail -f /opt/market-signal-monitor/logs/market-signal-monitor.log
 ```
 
 如果手动执行失败，这里通常最先能看到原因。
@@ -321,24 +321,24 @@ tail -f /opt/NDX/logs/ndx-monitor.log
 
 确认项目里的 systemd 模板已经在正确位置：
 
-- `deploy/ndx-monitor.service`
-- `deploy/ndx-monitor.timer`
+- `deploy/market-signal-monitor.service`
+- `deploy/market-signal-monitor.timer`
 
 然后执行：
 
 ```bash
-cp deploy/ndx-monitor.service /etc/systemd/system/
-cp deploy/ndx-monitor.timer /etc/systemd/system/
+cp deploy/market-signal-monitor.service /etc/systemd/system/
+cp deploy/market-signal-monitor.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now ndx-monitor.timer
-systemctl restart ndx-monitor.timer
+systemctl enable --now market-signal-monitor.timer
+systemctl restart market-signal-monitor.timer
 ```
 
 检查 timer 状态：
 
 ```bash
-systemctl status ndx-monitor.timer --no-pager
-systemctl list-timers ndx-monitor.timer
+systemctl status market-signal-monitor.timer --no-pager
+systemctl list-timers market-signal-monitor.timer
 ```
 
 你应该看到：
@@ -351,8 +351,8 @@ systemctl list-timers ndx-monitor.timer
 可以主动触发一次 service：
 
 ```bash
-systemctl start ndx-monitor.service
-journalctl -u ndx-monitor.service -n 50 --no-pager
+systemctl start market-signal-monitor.service
+journalctl -u market-signal-monitor.service -n 50 --no-pager
 ```
 
 如果看到：
@@ -363,7 +363,7 @@ journalctl -u ndx-monitor.service -n 50 --no-pager
 
 补充说明：
 
-- `ndx-monitor.service` 是一次性任务，不是常驻进程
+- `market-signal-monitor.service` 是一次性任务，不是常驻进程
 - 所以运行完成后显示 `inactive (dead)` 且 `status=0/SUCCESS` 属于正常现象
 
 ## 十四、以后最常用的运维命令
@@ -371,36 +371,36 @@ journalctl -u ndx-monitor.service -n 50 --no-pager
 ### 1. 看定时器状态
 
 ```bash
-systemctl status ndx-monitor.timer --no-pager
-systemctl list-timers ndx-monitor.timer
+systemctl status market-signal-monitor.timer --no-pager
+systemctl list-timers market-signal-monitor.timer
 ```
 
 ### 2. 看服务状态
 
 ```bash
-systemctl status ndx-monitor.service --no-pager
+systemctl status market-signal-monitor.service --no-pager
 ```
 
 ### 3. 看本地日志
 
 ```bash
-tail -f /opt/NDX/logs/ndx-monitor.log
-tail -n 100 /opt/NDX/logs/ndx-monitor.log
+tail -f /opt/market-signal-monitor/logs/market-signal-monitor.log
+tail -n 100 /opt/market-signal-monitor/logs/market-signal-monitor.log
 ```
 
 ### 4. 看 systemd 日志
 
 ```bash
-journalctl -u ndx-monitor.service -n 100 --no-pager
-journalctl -u ndx-monitor.timer -n 50 --no-pager
+journalctl -u market-signal-monitor.service -n 100 --no-pager
+journalctl -u market-signal-monitor.timer -n 50 --no-pager
 ```
 
 ### 5. 手动补跑
 
 ```bash
-cd /opt/NDX
+cd /opt/market-signal-monitor
 source .venv/bin/activate
-python ndx_monitor.py --force-send
+python market_monitor.py --force-send
 ```
 
 ## 十五、如果某天没收到邮件，怎么查
@@ -408,10 +408,10 @@ python ndx_monitor.py --force-send
 按这个顺序查通常最快：
 
 ```bash
-systemctl list-timers ndx-monitor.timer
-systemctl status ndx-monitor.service --no-pager
-tail -n 100 /opt/NDX/logs/ndx-monitor.log
-journalctl -u ndx-monitor.service --since "today 07:40" --no-pager
+systemctl list-timers market-signal-monitor.timer
+systemctl status market-signal-monitor.service --no-pager
+tail -n 100 /opt/market-signal-monitor/logs/market-signal-monitor.log
+journalctl -u market-signal-monitor.service --since "today 07:40" --no-pager
 ```
 
 常见情况：
@@ -437,20 +437,20 @@ journalctl -u ndx-monitor.service --since "today 07:40" --no-pager
 2. 时区不设对，发送时间就不对
 3. 不安装中文字体，图表里的中文可能是方块
 4. systemd unit 文件复制后要 `daemon-reload`
-5. 只有手动 `python ndx_monitor.py --send-test-email` 测过，才算真正验证过
+5. 只有手动 `python market_monitor.py --send-test-email` 测过，才算真正验证过
 
 ## 十七、推荐的上线后检查清单
 
 新 VPS 部署完成后，建议至少完成下面这些检查：
 
 ```bash
-cd /opt/NDX
+cd /opt/market-signal-monitor
 source .venv/bin/activate
-python ndx_monitor.py --dry-run
-python ndx_monitor.py --send-test-email
-systemctl status ndx-monitor.timer --no-pager
-systemctl list-timers ndx-monitor.timer
-tail -n 50 /opt/NDX/logs/ndx-monitor.log
+python market_monitor.py --dry-run
+python market_monitor.py --send-test-email
+systemctl status market-signal-monitor.timer --no-pager
+systemctl list-timers market-signal-monitor.timer
+tail -n 50 /opt/market-signal-monitor/logs/market-signal-monitor.log
 ```
 
 如果这几步都正常，说明这台 VPS 已经具备稳定运行条件。
