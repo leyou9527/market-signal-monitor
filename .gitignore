@@ -1,0 +1,47 @@
+# Secrets and real environment configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.ppk
+id_rsa*
+id_ed25519*
+
+# Private operations documentation
+HANDOVER.md
+
+# Runtime state, caches, and logs
+data/
+logs/
+*.log
+
+# Python environments and generated files
+.venv/
+.venv_local/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Editors and local agent metadata
+.idea/
+.vscode/
+.agents/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
