@@ -1,0 +1,10 @@
+[Unit]
+Description=NDX drawdown monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/NDX
+ExecStart=/opt/NDX/.venv/bin/python /opt/NDX/ndx_monitor.py
+User=root
