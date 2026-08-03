@@ -196,8 +196,7 @@ def summarize_sources(index_result: FetchResult, stock_fetch_results: dict[str, 
 def load_settings(base_dir: Path) -> Settings:
     # API key 在这里设计成“可选”，是因为这套脚本本来就依赖多数据源兜底。
     # 某个 key 缺失时不该让程序直接无法启动，而应该交给后面的 provider 链路去跳过。
-    # 新部署优先使用 INDEX_*；同时继续兼容旧 NDX_* 变量名，避免线上 .env 立即迁移。
-    # 现在这些字段虽然名字没改，但实际控制的是“标普500指数”这一组规则。
+    # 指数相关规则统一使用 INDEX_* 配置，当前监控对象是标普 500 指数。
     smtp_use_ssl = env("SMTP_USE_SSL", default="false").lower() == "true"
     smtp_use_starttls = env("SMTP_USE_STARTTLS", default="true").lower() == "true"
     if smtp_use_ssl and smtp_use_starttls:
@@ -236,9 +235,9 @@ def load_settings(base_dir: Path) -> Settings:
     ]
 
     return Settings(
-        index_lookback_days=env_int("INDEX_LOOKBACK_DAYS", "NDX_LOOKBACK_DAYS", "LOOKBACK_DAYS", default=60),
-        index_60d_threshold_pct=env_float("INDEX_60D_DROP_THRESHOLD_PCT", "NDX_60D_DROP_THRESHOLD_PCT", "DROP_THRESHOLD_PCT", default=7.0),
-        index_ytd_threshold_pct=env_float("INDEX_YTD_DROP_THRESHOLD_PCT", "NDX_YTD_DROP_THRESHOLD_PCT", default=7.0),
+        index_lookback_days=env_int("INDEX_LOOKBACK_DAYS", default=60),
+        index_60d_threshold_pct=env_float("INDEX_60D_DROP_THRESHOLD_PCT", default=7.0),
+        index_ytd_threshold_pct=env_float("INDEX_YTD_DROP_THRESHOLD_PCT", default=7.0),
         stock_lookback_days=env_int("STOCK_LOOKBACK_DAYS", default=60),
         stock_60d_threshold_pct=env_float("STOCK_60D_DROP_THRESHOLD_PCT", default=20.0),
         tech_stocks=tech_stocks,
