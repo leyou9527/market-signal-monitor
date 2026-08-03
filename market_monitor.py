@@ -67,8 +67,7 @@ class Settings:
     smtp_user: str
     smtp_password: str
     smtp_sender: str
-    smtp_recipient: str
-    smtp_bcc: str
+    email_recipients: str
     smtp_use_ssl: bool
     smtp_use_starttls: bool
     state_file: Path
@@ -260,8 +259,7 @@ def load_settings(base_dir: Path) -> Settings:
         smtp_user=env("SMTP_USER", required=email_provider == "smtp"),
         smtp_password=env("SMTP_PASSWORD", required=email_provider == "smtp"),
         smtp_sender=env("SMTP_SENDER", required=email_provider == "smtp"),
-        smtp_recipient=env("SMTP_RECIPIENT", required=True),
-        smtp_bcc=env("SMTP_BCC"),
+        email_recipients=env("EMAIL_RECIPIENTS", required=True),
         smtp_use_ssl=smtp_use_ssl,
         smtp_use_starttls=smtp_use_starttls,
         state_file=Path(env("STATE_FILE", default=str(base_dir / "data" / "state.json"))),
@@ -941,7 +939,7 @@ def resend_retry_wait_seconds(response: object | None, attempt: int, base_delay_
 def send_resend_email(settings: Settings, subject: str, plain: str, html: str, chart_bytes: bytes | None = None) -> None:
     import requests
 
-    recipients = unique_email_addresses(parse_email_addresses(settings.smtp_recipient) + parse_email_addresses(settings.smtp_bcc))
+    recipients = unique_email_addresses(parse_email_addresses(settings.email_recipients))
     if not recipients:
         raise RuntimeError("Resend email delivery failed: no valid recipients")
 
@@ -1036,26 +1034,35 @@ def send_resend_email(settings: Settings, subject: str, plain: str, html: str, c
 
 
 def send_smtp_email(settings: Settings, subject: str, plain: str, html: str, chart_bytes: bytes | None = None) -> None:
-    message = EmailMessage()
-    message["Subject"] = subject
-    message["From"] = settings.smtp_sender
-    message["To"] = settings.smtp_recipient
-    recipients = parse_email_addresses(settings.smtp_recipient) + parse_email_addresses(settings.smtp_bcc)
-    message.set_content(plain)
-    message.add_alternative(html, subtype="html")
-    if chart_bytes is not None:
-        message.get_payload()[-1].add_related(
-            chart_bytes,
-            maintype="image",
-            subtype="png",
-            cid="<market_chart>",
-            filename="market-chart.png",
-        )
+    recipients = unique_email_addresses(parse_email_addresses(settings.email_recipients))
+    if not recipients:
+        raise RuntimeError("SMTP email delivery failed: no valid recipients")
+
+    def build_message(recipient: str) -> EmailMessage:
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = settings.smtp_sender
+        message["To"] = recipient
+        message.set_content(plain)
+        message.add_alternative(html, subtype="html")
+        if chart_bytes is not None:
+            message.get_payload()[-1].add_related(
+                chart_bytes,
+                maintype="image",
+                subtype="png",
+                cid="<market_chart>",
+                filename="market-chart.png",
+            )
+        return message
+
+    def deliver(server: smtplib.SMTP) -> None:
+        server.login(settings.smtp_user, settings.smtp_password)
+        for recipient in recipients:
+            server.send_message(build_message(recipient), to_addrs=[recipient])
 
     if settings.smtp_use_ssl:
         with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, context=ssl.create_default_context()) as server:
-            server.login(settings.smtp_user, settings.smtp_password)
-            server.send_message(message, to_addrs=recipients)
+            deliver(server)
         return
 
     with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
@@ -1063,8 +1070,7 @@ def send_smtp_email(settings: Settings, subject: str, plain: str, html: str, cha
         if settings.smtp_use_starttls:
             server.starttls(context=ssl.create_default_context())
             server.ehlo()
-        server.login(settings.smtp_user, settings.smtp_password)
-        server.send_message(message, to_addrs=recipients)
+        deliver(server)
 
 
 def send_email(settings: Settings, subject: str, plain: str, html: str, chart_bytes: bytes | None = None) -> None:

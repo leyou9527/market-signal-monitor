@@ -143,11 +143,10 @@ RESEND_FROM=Market Monitor <report@your-domain.example>
 RESEND_REQUESTS_PER_SECOND=4
 RESEND_MAX_ATTEMPTS=4
 RESEND_RETRY_DELAY_SECONDS=1
-SMTP_RECIPIENT=owner@example.com
-SMTP_BCC=employee1@example.com,employee2@example.com
+EMAIL_RECIPIENTS=owner@example.com,employee1@example.com,employee2@example.com
 ```
 
-`SMTP_RECIPIENT` 和 `SMTP_BCC` 是程序当前统一使用的收件人配置入口。在 Resend 模式下，它们不会被直接作为传统 BCC 邮件头发送，而会被解析、去重，然后逐个调用 Resend API：
+`EMAIL_RECIPIENTS` 是统一的收件人配置入口。多个地址用英文逗号分隔；程序解析并去重后，逐个调用 Resend API：
 
 - 每个人收到一封独立邮件。
 - 每封邮件的 `To` 只包含当前收件人自己。
@@ -187,11 +186,12 @@ SMTP_PORT=587
 SMTP_USER=sender@example.com
 SMTP_PASSWORD=邮箱授权码
 SMTP_SENDER=sender@example.com
-SMTP_RECIPIENT=owner@example.com
-SMTP_BCC=employee1@example.com,employee2@example.com
+EMAIL_RECIPIENTS=owner@example.com,employee1@example.com,employee2@example.com
 SMTP_USE_SSL=false
 SMTP_USE_STARTTLS=true
 ```
+
+SMTP 备用模式同样逐个独立投递，每封邮件的 `To` 只包含当前收件人，不使用共享的 To 或 BCC 头。
 
 常见示例：
 
@@ -267,8 +267,7 @@ market-signal-monitor/
 - `RESEND_REQUESTS_PER_SECOND`：默认 `4`
 - `RESEND_MAX_ATTEMPTS`：默认 `4`
 - `RESEND_RETRY_DELAY_SECONDS`：默认 `1`
-- `SMTP_RECIPIENT`
-- `SMTP_BCC`
+- `EMAIL_RECIPIENTS`：全部收件人，多个地址使用英文逗号分隔
 - `SMTP_HOST`
 - `SMTP_PORT`
 - `SMTP_USER`
@@ -458,7 +457,7 @@ chmod 600 .env
 
 - 指数和个股规则使用 `INDEX_*`、`STOCK_*`
 - Resend 或 SMTP 配置完整
-- `SMTP_RECIPIENT` 和 `SMTP_BCC` 正确
+- `EMAIL_RECIPIENTS` 包含完整且正确的收件人列表
 - 至少一个在线数据源 Key 可用
 - 日志、缓存和状态路径指向 `/opt/market-signal-monitor`
 

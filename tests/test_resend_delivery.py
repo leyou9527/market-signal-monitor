@@ -32,10 +32,9 @@ class FakeRequests:
         return outcome
 
 
-def settings(recipients: str = "first@example.com", bcc: str = "second@example.com") -> SimpleNamespace:
+def settings(recipients: str = "first@example.com,second@example.com") -> SimpleNamespace:
     return SimpleNamespace(
-        smtp_recipient=recipients,
-        smtp_bcc=bcc,
+        email_recipients=recipients,
         resend_from="Market Monitor <report@example.com>",
         resend_api_key="test-key",
         resend_requests_per_second=4.0,
@@ -74,6 +73,29 @@ class ResendDeliveryTests(unittest.TestCase):
         self.assertEqual(len(fake_requests.calls), 2)
         self.assertEqual(fake_requests.calls[1]["json"]["to"], ["second@example.com"])
 
+    def test_smtp_sends_separate_messages_without_exposing_other_recipients(self) -> None:
+        smtp_settings = SimpleNamespace(
+            email_recipients="first@example.com,second@example.com",
+            smtp_sender="sender@example.com",
+            smtp_use_ssl=False,
+            smtp_host="smtp.example.com",
+            smtp_port=587,
+            smtp_use_starttls=False,
+            smtp_user="sender@example.com",
+            smtp_password="test-password",
+        )
+
+        with patch.object(market_monitor.smtplib, "SMTP") as smtp_class:
+            server = smtp_class.return_value.__enter__.return_value
+            market_monitor.send_smtp_email(smtp_settings, "subject", "plain", "html")
+
+        self.assertEqual(server.send_message.call_count, 2)
+        first_call, second_call = server.send_message.call_args_list
+        self.assertEqual(first_call.args[0]["To"], "first@example.com")
+        self.assertEqual(first_call.kwargs["to_addrs"], ["first@example.com"])
+        self.assertEqual(second_call.args[0]["To"], "second@example.com")
+        self.assertEqual(second_call.kwargs["to_addrs"], ["second@example.com"])
+
     def test_requests_are_paced(self) -> None:
         fake_requests = FakeRequests([FakeResponse(200), FakeResponse(200)])
 
@@ -85,6 +107,21 @@ class ResendDeliveryTests(unittest.TestCase):
             market_monitor.send_resend_email(settings(), "subject", "plain", "html")
 
         sleep_mock.assert_called_once_with(0.25)
+
+    def test_duplicate_recipients_are_sent_once(self) -> None:
+        fake_requests = FakeRequests([FakeResponse(200), FakeResponse(200)])
+
+        with patch.dict(sys.modules, {"requests": fake_requests}):
+            market_monitor.send_resend_email(
+                settings("first@example.com, FIRST@example.com, second@example.com"),
+                "subject",
+                "plain",
+                "html",
+            )
+
+        self.assertEqual(len(fake_requests.calls), 2)
+        self.assertEqual(fake_requests.calls[0]["json"]["to"], ["first@example.com"])
+        self.assertEqual(fake_requests.calls[1]["json"]["to"], ["second@example.com"])
 
 
 if __name__ == "__main__":
