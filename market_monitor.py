@@ -922,6 +922,10 @@ def unique_email_addresses(addresses: list[str]) -> list[str]:
     return unique
 
 
+def configured_email_recipients(settings: Settings) -> list[str]:
+    return unique_email_addresses(parse_email_addresses(settings.email_recipients))
+
+
 def resend_retry_wait_seconds(response: object | None, attempt: int, base_delay_seconds: float) -> float:
     if response is not None:
         headers = getattr(response, "headers", {})
@@ -936,10 +940,18 @@ def resend_retry_wait_seconds(response: object | None, attempt: int, base_delay_
     return base_delay_seconds * (2 ** max(attempt - 1, 0))
 
 
-def send_resend_email(settings: Settings, subject: str, plain: str, html: str, chart_bytes: bytes | None = None) -> None:
+def send_resend_email(
+    settings: Settings,
+    subject: str,
+    plain: str,
+    html: str,
+    chart_bytes: bytes | None = None,
+    *,
+    recipients: list[str] | None = None,
+) -> None:
     import requests
 
-    recipients = unique_email_addresses(parse_email_addresses(settings.email_recipients))
+    recipients = unique_email_addresses(recipients) if recipients is not None else configured_email_recipients(settings)
     if not recipients:
         raise RuntimeError("Resend email delivery failed: no valid recipients")
 
@@ -1033,8 +1045,16 @@ def send_resend_email(settings: Settings, subject: str, plain: str, html: str, c
         )
 
 
-def send_smtp_email(settings: Settings, subject: str, plain: str, html: str, chart_bytes: bytes | None = None) -> None:
-    recipients = unique_email_addresses(parse_email_addresses(settings.email_recipients))
+def send_smtp_email(
+    settings: Settings,
+    subject: str,
+    plain: str,
+    html: str,
+    chart_bytes: bytes | None = None,
+    *,
+    recipients: list[str] | None = None,
+) -> None:
+    recipients = unique_email_addresses(recipients) if recipients is not None else configured_email_recipients(settings)
     if not recipients:
         raise RuntimeError("SMTP email delivery failed: no valid recipients")
 
@@ -1073,20 +1093,32 @@ def send_smtp_email(settings: Settings, subject: str, plain: str, html: str, cha
         deliver(server)
 
 
-def send_email(settings: Settings, subject: str, plain: str, html: str, chart_bytes: bytes | None = None) -> None:
+def send_email(
+    settings: Settings,
+    subject: str,
+    plain: str,
+    html: str,
+    chart_bytes: bytes | None = None,
+    *,
+    recipients: list[str] | None = None,
+) -> None:
     if settings.email_provider == "resend":
-        send_resend_email(settings, subject, plain, html, chart_bytes)
+        send_resend_email(settings, subject, plain, html, chart_bytes, recipients=recipients)
         return
-    send_smtp_email(settings, subject, plain, html, chart_bytes)
+    send_smtp_email(settings, subject, plain, html, chart_bytes, recipients=recipients)
 
 
 def send_failure_email(settings: Settings, error_message: str, log_file: Path) -> None:
     # 这里专门发“异常通知”，是因为真正重要的不是每次都硬凑一封日报，
     # 而是当日报无法保证准确时，用户至少要第一时间知道服务出了问题。
     today = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    subject = "[市场监控异常] 数据获取失败"
+    recipients = configured_email_recipients(settings)
+    if not recipients:
+        raise RuntimeError("Failure notice delivery failed: no valid primary recipient")
+    primary_recipient = recipients[0]
+    subject = "[市场监控异常] 日报运行失败"
     plain = (
-        "今天的市场日报没有正常生成。\n\n"
+        "今天的市场日报没有正常完成。\n\n"
         f"失败时间: {today}\n"
         f"错误信息: {error_message}\n"
         f"日志文件: {log_file}\n\n"
@@ -1121,7 +1153,9 @@ def send_failure_email(settings: Settings, error_message: str, log_file: Path) -
     </table>
   </body>
 </html>"""
-    send_email(settings, subject, plain, html)
+    # 异常通知只发给配置中的第一位负责人。正常日报可以有任意数量的收件人，
+    # 但员工和其他订阅者不应被内部运行故障打扰。
+    send_email(settings, subject, plain, html, recipients=[primary_recipient])
 
 
 def is_market_data_finalized(market_date: str, now_utc: datetime | None = None) -> bool:

@@ -1,5 +1,6 @@
 import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -34,6 +35,7 @@ class FakeRequests:
 
 def settings(recipients: str = "first@example.com,second@example.com") -> SimpleNamespace:
     return SimpleNamespace(
+        email_provider="resend",
         email_recipients=recipients,
         resend_from="Market Monitor <report@example.com>",
         resend_api_key="test-key",
@@ -122,6 +124,20 @@ class ResendDeliveryTests(unittest.TestCase):
         self.assertEqual(len(fake_requests.calls), 2)
         self.assertEqual(fake_requests.calls[0]["json"]["to"], ["first@example.com"])
         self.assertEqual(fake_requests.calls[1]["json"]["to"], ["second@example.com"])
+
+    def test_failure_notice_is_sent_only_to_first_configured_recipient(self) -> None:
+        fake_requests = FakeRequests([FakeResponse(200)])
+
+        with patch.dict(sys.modules, {"requests": fake_requests}):
+            market_monitor.send_failure_email(
+                settings("owner@example.com,employee1@example.com,employee2@example.com"),
+                "test failure",
+                Path("test.log"),
+            )
+
+        self.assertEqual(len(fake_requests.calls), 1)
+        self.assertEqual(fake_requests.calls[0]["json"]["to"], ["owner@example.com"])
+        self.assertEqual(fake_requests.calls[0]["json"]["subject"], "[市场监控异常] 日报运行失败")
 
 
 if __name__ == "__main__":
