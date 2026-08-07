@@ -152,7 +152,8 @@ EMAIL_RECIPIENTS=owner@example.com,employee1@example.com,employee2@example.com
 - 每封邮件的 `To` 只包含当前收件人自己。
 - 收件人互相看不到彼此。
 - 默认主动限速为每秒 4 个请求，低于 Resend 常见的每秒 5 请求限制。
-- 遇到 `429`、`5xx` 或临时网络错误时采用指数退避，默认最多尝试 4 次。
+- 任意首次发送失败都会等待后补偿一次；补偿成功即按正常成功处理，不触发异常通知。
+- 网络错误、`429` 和 `5xx` 在补偿后仍可继续指数退避，默认最多尝试 4 次。
 - 同一收件人的重试复用同一个幂等键，降低网络结果不明确时重复投递的风险。
 - 单个地址永久失败不会阻断后续地址；全部处理完成后统一汇总失败并以失败状态退出。
 - 任何异常通知只发送给 `EMAIL_RECIPIENTS` 去重后的第一个地址；其余正常日报收件人不会收到内部故障通知。
@@ -266,7 +267,7 @@ market-signal-monitor/
 - `RESEND_API_KEY`
 - `RESEND_FROM`
 - `RESEND_REQUESTS_PER_SECOND`：默认 `4`
-- `RESEND_MAX_ATTEMPTS`：默认 `4`
+- `RESEND_MAX_ATTEMPTS`：默认 `4`，最小为 `2`，确保至少有一次补偿机会
 - `RESEND_RETRY_DELAY_SECONDS`：默认 `1`
 - `EMAIL_RECIPIENTS`：全部收件人，多个地址使用英文逗号分隔
 - `SMTP_HOST`
@@ -335,6 +336,7 @@ python -m unittest discover -s tests -v
 当前测试覆盖：
 
 - Resend `429` 重试
+- Resend 首次 `400` 失败后的补偿与恢复
 - 同一收件人重试复用幂等键
 - 单个永久失败不阻断后续收件人
 - 请求主动限速

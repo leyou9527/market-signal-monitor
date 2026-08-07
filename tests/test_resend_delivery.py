@@ -66,14 +66,34 @@ class ResendDeliveryTests(unittest.TestCase):
         self.assertNotEqual(first_key, second_recipient_key)
 
     def test_permanent_failure_does_not_block_later_recipient(self) -> None:
-        fake_requests = FakeRequests([FakeResponse(400, "invalid recipient"), FakeResponse(200)])
+        fake_requests = FakeRequests(
+            [FakeResponse(400, "invalid recipient"), FakeResponse(400, "invalid recipient"), FakeResponse(200)]
+        )
 
         with patch.dict(sys.modules, {"requests": fake_requests}), patch.object(market_monitor.time, "sleep"):
             with self.assertRaisesRegex(RuntimeError, "delivered to 1/2 recipients"):
                 market_monitor.send_resend_email(settings(), "subject", "plain", "html")
 
+        self.assertEqual(len(fake_requests.calls), 3)
+        self.assertEqual(fake_requests.calls[2]["json"]["to"], ["second@example.com"])
+
+    def test_http_400_is_compensated_once_and_can_recover(self) -> None:
+        fake_requests = FakeRequests([FakeResponse(400, "<html>Bad Request</html>"), FakeResponse(200)])
+
+        with (
+            patch.dict(sys.modules, {"requests": fake_requests}),
+            patch.object(market_monitor.time, "sleep") as sleep_mock,
+        ):
+            market_monitor.send_resend_email(settings("first@example.com"), "subject", "plain", "html")
+
         self.assertEqual(len(fake_requests.calls), 2)
-        self.assertEqual(fake_requests.calls[1]["json"]["to"], ["second@example.com"])
+        self.assertEqual(fake_requests.calls[0]["json"]["to"], ["first@example.com"])
+        self.assertEqual(fake_requests.calls[1]["json"]["to"], ["first@example.com"])
+        self.assertEqual(
+            fake_requests.calls[0]["headers"]["Idempotency-Key"],
+            fake_requests.calls[1]["headers"]["Idempotency-Key"],
+        )
+        self.assertTrue(any(call.args == (1.0,) for call in sleep_mock.call_args_list))
 
     def test_smtp_sends_separate_messages_without_exposing_other_recipients(self) -> None:
         smtp_settings = SimpleNamespace(

@@ -214,8 +214,8 @@ def load_settings(base_dir: Path) -> Settings:
     resend_retry_delay_seconds = env_float("RESEND_RETRY_DELAY_SECONDS", default=1.0)
     if resend_requests_per_second <= 0:
         raise ConfigError("RESEND_REQUESTS_PER_SECOND must be greater than 0")
-    if resend_max_attempts < 1:
-        raise ConfigError("RESEND_MAX_ATTEMPTS must be at least 1")
+    if resend_max_attempts < 2:
+        raise ConfigError("RESEND_MAX_ATTEMPTS must be at least 2")
     if resend_retry_delay_seconds < 0:
         raise ConfigError("RESEND_RETRY_DELAY_SECONDS cannot be negative")
 
@@ -1021,14 +1021,20 @@ def send_resend_email(
                 failure_detail = f"HTTP {response.status_code} {response.text[:500]}"
                 retryable = response.status_code == 429 or response.status_code >= 500
 
-            if not retryable or attempt >= settings.resend_max_attempts:
+            # Every initial failure gets one compensation attempt, including
+            # non-retryable HTTP errors such as a transient generic HTML 400.
+            # After that compensation attempt, only network errors, 429, and
+            # 5xx responses continue through the remaining retry budget.
+            compensation_available = attempt == 1
+            if attempt >= settings.resend_max_attempts or (not retryable and not compensation_available):
                 failures.append(f"{recipient}: {failure_detail}")
                 logger.error("Resend delivery failed for %s after %s attempt(s): %s", recipient, attempt, failure_detail)
                 break
 
             retry_wait = resend_retry_wait_seconds(response, attempt, settings.resend_retry_delay_seconds)
             logger.warning(
-                "Resend delivery retry for %s after %s (attempt %s/%s, wait %.2fs).",
+                "Resend %s for %s after %s (attempt %s/%s, wait %.2fs).",
+                "compensation retry" if compensation_available else "delivery retry",
                 recipient,
                 failure_detail,
                 attempt,
